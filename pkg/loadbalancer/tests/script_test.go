@@ -38,6 +38,7 @@ import (
 	"github.com/cilium/cilium/pkg/lbipamconfig"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	lbcell "github.com/cilium/cilium/pkg/loadbalancer/cell"
+	lbmaps "github.com/cilium/cilium/pkg/loadbalancer/maps"
 	lbreconciler "github.com/cilium/cilium/pkg/loadbalancer/reconciler"
 	"github.com/cilium/cilium/pkg/loadbalancer/writer"
 	"github.com/cilium/cilium/pkg/logging"
@@ -193,6 +194,7 @@ func (tc testCommands) cmds() map[string]script.Cmd {
 		"test/set-node-ip":                  tc.setNodeIP(),
 		"test/set-is-service-healthchecked": tc.setIsServiceHealthChecked(),
 		"test/init-wait":                    tc.initWait(),
+		"test/dump-lbmap":                   tc.dumpLBMap(),
 	}
 }
 
@@ -311,5 +313,79 @@ func (tc testCommands) initWait() script.Cmd {
 		script.CmdUsage{Summary: "Wait for InitWaitFunc() to return"},
 		func(s *script.State, args ...string) (script.WaitFunc, error) {
 			return nil, tc.waitFn(s.Context())
+		})
+}
+
+// dumpLBMap builds a Service4Value or Service6Value and prints its String()
+// output. The value is stored via ToNetwork() before String()'s ToHost()
+// round-trips it, mirroring a real 'cilium map get' dump and keeping the output
+// byte-order independent.
+//
+// With --l7 the L7LB flag is set and <id> is the Envoy proxy port, stored in the
+// BackendID union in network byte order and decoded by GetL7LBProxyPort();
+// otherwise <id> is a plain backend identifier.
+func (tc testCommands) dumpLBMap() script.Cmd {
+	return script.Command(
+		script.CmdUsage{
+			Summary: "Format a service map value via Service{4,6}Value.String()",
+			Args:    "<family: 4|6> <id> <count> <qcount> <revnat>",
+			Flags: func(fs *pflag.FlagSet) {
+				fs.Bool("l7", false, "Build an L7 entry: <id> is the Envoy proxy port")
+			},
+		},
+		func(s *script.State, args ...string) (script.WaitFunc, error) {
+			if len(args) != 5 {
+				return nil, fmt.Errorf("%w: expected family, id, count, qcount, revnat", script.ErrUsage)
+			}
+
+			var val lbmaps.ServiceValue
+			switch args[0] {
+			case "4":
+				val = &lbmaps.Service4Value{}
+			case "6":
+				val = &lbmaps.Service6Value{}
+			default:
+				return nil, fmt.Errorf("invalid family %q: want 4 or 6", args[0])
+			}
+
+			isL7, err := s.Flags.GetBool("l7")
+			if err != nil {
+				return nil, err
+			}
+
+			id, err := strconv.ParseUint(args[1], 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("invalid id %q: %w", args[1], err)
+			}
+			count, err := strconv.Atoi(args[2])
+			if err != nil {
+				return nil, fmt.Errorf("invalid count %q: %w", args[2], err)
+			}
+			qcount, err := strconv.Atoi(args[3])
+			if err != nil {
+				return nil, fmt.Errorf("invalid qcount %q: %w", args[3], err)
+			}
+			revnat, err := strconv.Atoi(args[4])
+			if err != nil {
+				return nil, fmt.Errorf("invalid revnat %q: %w", args[4], err)
+			}
+
+			val.SetFlags(uint16(loadbalancer.NewSvcFlag(&loadbalancer.SvcFlagParam{
+				SvcType:        loadbalancer.SVCTypeLoadBalancer,
+				IsRoutable:     true,
+				L7LoadBalancer: isL7,
+			})))
+			if isL7 {
+				val.SetL7LBProxyPort(uint16(id))
+			} else {
+				val.SetBackendID(loadbalancer.BackendID(id))
+			}
+			val.SetCount(count)
+			val.SetQCount(qcount)
+			val.SetRevNat(revnat)
+
+			return func(*script.State) (stdout, stderr string, err error) {
+				return val.ToNetwork().String() + "\n", "", nil
+			}, nil
 		})
 }

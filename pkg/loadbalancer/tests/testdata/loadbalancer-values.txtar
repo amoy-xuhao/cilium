@@ -1,0 +1,19 @@
+#! --lb-test-fault-probability=0.0
+#
+# Verify the String() formatting of Service4Value and Service6Value.
+# With --l7 the L7 proxy port is decoded; otherwise the backend ID is shown.
+
+hive/start
+
+# L7: the proxy port (18036) is decoded, not the byte-swapped raw value
+# (which would show 29766 on little-endian systems).
+test/dump-lbmap --l7 4 18036 0 0 42
+stdout '18036 0\[0\] \(42\) \[0x60 0x4\]'
+test/dump-lbmap --l7 6 18036 0 0 42
+stdout '18036 0\[0\] \(42\) \[0x60 0x4\]'
+
+# Non-L7: the backend identifier is shown.
+test/dump-lbmap 4 12345 0 0 42
+stdout '12345 0\[0\] \(42\) \[0x60 0x0\]'
+test/dump-lbmap 6 12345 2 1 42
+stdout '12345 2\[1\] \(42\) \[0x60 0x0\]'
